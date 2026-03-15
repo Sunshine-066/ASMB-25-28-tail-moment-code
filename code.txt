@@ -1,4 +1,4 @@
-# 安装必要的包
+# Install necessary packages if not already installed
 if (!require("insuranceData")) install.packages("insuranceData")
 if (!require("fitdistrplus")) install.packages("fitdistrplus")
 if (!require("actuar")) install.packages("actuar")
@@ -9,111 +9,100 @@ library(fitdistrplus)
 library(actuar)
 library(ggplot2)
 library(moments) 
-library(VineCopula)  # 用于FGM copula
-#library(CopulaModel) # 额外的copula函数
+library(VineCopula)  # For FGM copula
+#library(CopulaModel) # Additional copula functions
 library(copula)
 library(numDeriv)
 
-# 加载数据集
+# Load dataset
 data(dataCar)
 df <-dataCar
 
 
-# 查看数据结构
+# View data structure
 str(df)
 summary(df)
 
-# 检查缺失值
-cat("缺失值统计:\n")
+# Check for missing values
+cat("Missing value count:\n")
 colSums(is.na(df))
 
-# 1. 筛选两类车体：SEDAN（轿车）和STNWG（运动旅行车）
+# 1. Select two vehicle body types: SEDAN and STNWG (Sport Wagon)
 df_sub <- df[df$veh_body %in% c("SEDAN", "STNWG"), ]
 
 
-# 2. 仅保留有索赔的记录（索赔金额>0）
+# 2. Keep only records with claims (claim amount > 0)
 claim_sedan <- df_sub$claimcst0[df_sub$veh_body == "SEDAN" & 
                                  df_sub$claimcst0 > 0 ]
 
 claim_stnwg <- df_sub$claimcst0[df_sub$veh_body == "STNWG" & 
                                  df_sub$claimcst0 > 0 ]
 
-# 3. 数据标准化（单位：千美元）便于解释
+# 3. Standardize data (unit: thousand dollars) for easier interpretation
 claim_sedan <- claim_sedan / 1000
 claim_stnwg <- claim_stnwg / 1000
 
 #set.seed(30)
 B <- 1e6 
-# 独立有放回抽取
+# Independent sampling with replacement
 X1_boot <- sample(claim_sedan, B, replace = TRUE)
 X2_boot <- sample(claim_stnwg, B, replace = TRUE)
 
-# 4. 记录基本统计量
+# 4. Record basic statistics
 data_summary <- function(data, name) {
-  cat("\n=== ", name, "业务线统计摘要 ===\n")
-  cat("样本量:", length(data), "\n")
-  cat("均值:", round(mean(data), 2), "千美元\n")
-  cat("标准差:", round(sd(data), 2), "千美元\n")
-  cat("方差:", round(var(data), 2), "千美元\n")
-  cat("中位数:", round(median(data), 2), "千美元\n")
-  cat("  偏度:", round(skewness(data), 3), "千美元\n")
-  cat("  峰度:", round(kurtosis(data), 3), "千美元\n")
-  cat("95%分位数:", round(quantile(data, 0.95), 2), "千美元\n")
-  cat("99%分位数:", round(quantile(data, 0.99), 2), "千美元\n")
+  cat("\n=== ", name, "Business Line Summary Statistics ===\n")
+  cat("Sample size:", length(data), "\n")
+  cat("Mean:", round(mean(data), 2), "thousand dollars\n")
+  cat("Standard deviation:", round(sd(data), 2), "thousand dollars\n")
+  cat("Variance:", round(var(data), 2), "thousand dollars\n")
+  cat("Median:", round(median(data), 2), "thousand dollars\n")
+  cat("  Skewness:", round(skewness(data), 3), "thousand dollars\n")
+  cat("  Kurtosis:", round(kurtosis(data), 3), "thousand dollars\n")
+  cat("95% quantile:", round(quantile(data, 0.95), 2), "thousand dollars\n")
+  cat("99% quantile:", round(quantile(data, 0.99), 2), "thousand dollars\n")
 }
 
 data_summary(claim_sedan, "SEDAN")
 data_summary(claim_stnwg, "STNWG")
 
-#增样之后的数据
+# Summary statistics after bootstrapping
 data_summary(X1_boot, "SEDAN")
 data_summary(X2_boot, "STNWG")
 
-##方法一：基于相关系数的估计
-# FGM分布的参数估计函数
-#fit_fgm <- function(data, theta = 0.5) {
-  # 使用最大似然估计FGM参数
-  # 简化版本：基于相关系数的估计
-  #rho <- cor(data$sedan, data$stnwg, method = "spearman")
-  # FGM分布的Spearman相关系数与theta的关系：rho = theta/3
-  #theta_est <- 3 * rho
-  #return(list(theta = theta_est, rho = rho))
-#}
-# 对这种种配对方法进行估计
+# Estimate for this paired method
 random_pairs <- data.frame(sedan = X1_boot, stnwg = X2_boot )
-#fit_random <- fit_fgm(random_pairs)
 
-##方法二：最大似然估计
+#Method 2: Maximum Likelihood Estimation
 fgm_mle_copula <- function(data) {
-  # 将数据转换为均匀分布分数（使用经验分布函数）
+  # Transform data to uniform scores (using empirical distribution function)
   u <- rank(data$sedan) / (length(data$sedan) + 1)
   v <- rank(data$stnwg) / (length(data$stnwg) + 1)
   
-  # FGM copula的密度函数
+  # Density function of FGM copula
   # c(u,v) = 1 + θ(1-2u)(1-2v)
   fgm_copula_density <- function(theta, u, v) {
     return(1 + theta * (1 - 2*u) * (1 - 2*v))
   }
   
-  # 负对数似然函数
+  # Negative log-likelihood function
   neg_log_likelihood <- function(theta) {
-    # 确保theta在[-1,1]范围内
+    # Ensure theta is within [-1,1]
     if(abs(theta) > 1) return(1e10)
     
-    # 计算密度值
+    # Calculate density values
     c_vals <- fgm_copula_density(theta, u, v)
     
-    # 确保密度为正
+    # Ensure density is positive
     if(any(c_vals <= 0)) return(1e10)
     
-    # 返回负对数似然
+    # Return negative log-likelihood
     return(-sum(log(c_vals)))
   }
   
-  # 使用optimize进行一维优化
+  # Use optimize for one-dimensional optimization
   result <- optimize(neg_log_likelihood, interval = c(-1, 1))
   
-  # 计算标准误（使用数值Hessian矩阵）
+  # Calculate standard error (using numerical Hessian matrix)
   hessian_val <- hessian(neg_log_likelihood, result$minimum)
   se <- sqrt(1 / hessian_val)
   
@@ -125,39 +114,25 @@ fgm_mle_copula <- function(data) {
   ))
 }
 
-# 执行MLE估计
+# Perform MLE estimation
 mle_result_copula <- fgm_mle_copula(random_pairs)
-print("FGM Copula MLE结果:")
+print("FGM Copula MLE Results:")
 print(mle_result_copula)
-# 构建置信区间
+# Construct confidence interval
 ci_lower <- mle_result_copula$theta - 1.96 * mle_result_copula$standard_error
 ci_upper <- mle_result_copula$theta + 1.96 * mle_result_copula$standard_error
 
-
-
-## 可视化（取子样本）
-#set.seed(123)
-#sedan_sub <- sample(X1_boot, 5000)
-#stnwg_sub <- sample(X2_boot, 5000)
-#par(mfrow = c(1, 1))
-#plot(stnwg_sub, sedan_sub, 
-#     xlim = c(0,5),     # X范围
-#     ylim = c(0,5),
-#     xlab = "SEDAN Claims", 
-#     ylab = "STNWG Claims",
-#     pch = 19, cex = 0.6, col = rgb(0,0,1,0.5))
-
-# Gamma分布矩估计函数
+# Gamma distribution moment estimation function
 gamma_mom <- function(data) {
   m <- mean(data)
   v <- var(data)
-  shape <- m^2 / v         # α (形状参数)
-  rate <- m / v            # γ (尺度参数的倒数)
+  shape <- m^2 / v         # α (shape parameter)
+  rate <- m / v            # γ (inverse of scale parameter)
   return(list(shape = shape, rate = rate, 
               mean = m, var = v))
 }
 
-# 参数估计
+# Parameter estimation
 fit_sedan_mom <- gamma_mom(X1_boot)
 fit_stnwg_mom <- gamma_mom(X2_boot)
 shape1<- fit_sedan_mom$shape
@@ -165,7 +140,7 @@ rate1<- fit_sedan_mom$rate
 shape2<- fit_stnwg_mom$shape
 rate2<- fit_stnwg_mom$rate
 
-cat("\n=== Gamma分布矩估计参数 ===\n")
+cat("\n=== Gamma Distribution Moment Estimation Parameters ===\n")
 cat("SEDAN: shape =", round(fit_sedan_mom$shape, 3), 
     "rate =", round(fit_sedan_mom$rate, 5), 
     "(γ =", round(fit_sedan_mom$rate, 5), ")\n")
@@ -173,27 +148,27 @@ cat("STNWG: shape =", round(fit_stnwg_mom$shape, 3),
     "rate =", round(fit_stnwg_mom$rate, 5), 
     "(γ =", round(fit_stnwg_mom$rate, 5), ")\n")
 
-# 确定γ*和Λ集合
+# Determine γ* and Λ set
 gamma_values <- c(SEDAN = fit_sedan_mom$rate, 
                   STNWG = fit_stnwg_mom$rate)
 gamma_star <- min(gamma_values)
 Lambda <- names(gamma_values)[gamma_values == gamma_star]
 Lambda_c <- names(gamma_values)[gamma_values != gamma_star]
 
-cat("\n=== 定理参数识别 ===\n")
+cat("\n=== Theorem Parameter Identification ===\n")
 cat("γ* = min(γ) =", round(gamma_star, 5), "\n")
 cat("Λ (γ_i = γ*) =", paste(Lambda, collapse = ", "), "\n")
 cat("Λ^c =", paste(Lambda_c, collapse = ", "), "\n")
 
 
-# QQ图可视化（取子样本）
+# QQ plot visualization (take subsample)
 set.seed(123)
 sedan_sub <- sample(X1_boot, 5000)
 stnwg_sub <- sample(X2_boot, 5000)
 
 par(cex.lab=1, cex.axis=1, cex.main=1)
 par(mfrow= c(1, 2),mar=c(4,4,2,1), oma=c(0,0,0,0), mgp=c(2,1,0))
-# STNWG QQ图
+# STNWG QQ plot
 qqplot(qgamma(ppoints(length(stnwg_sub)), 
               shape = fit_stnwg_mom$shape, 
               rate = fit_stnwg_mom$rate),
@@ -205,7 +180,7 @@ pch = 19, col = rgb(0.8, 0.4, 0.2, 0.6), cex = 0.8, lwd = 1.5)
 abline(0, 1, col = "red", cex = 0.8, lwd = 1.5)
 #grid()
 
-# SEDAN QQ图
+# SEDAN QQ plot
 qqplot(qgamma(ppoints(length(sedan_sub )), 
               shape = fit_sedan_mom$shape, 
               rate = fit_sedan_mom$rate),
@@ -221,7 +196,7 @@ abline(0, 1, col = "red",cex = 0.8, lwd = 1.5)
 
 
 
-# 密度图对比
+# Density plot comparison
 par(cex.lab=1, cex.axis=1, cex.main=1)
 par(mfrow= c(1, 2),mar=c(4,4,2,1), oma=c(0,0,0,0), mgp=c(2,1,0))
 hist(X2_boot, breaks = 30, probability = TRUE,
@@ -242,7 +217,7 @@ curve(dgamma(x, shape = fit_sedan_mom$shape,
 
 
 
-# 选取总损失99.9%分位数作为阈值99.9%,99.95%,99.99%
+# Select the 99.9% quantile of total loss as threshold
 S_boot <- X1_boot+X2_boot 
 #t <- quantile(S_boot, 0.999)   
 n <- 1
@@ -251,11 +226,11 @@ indicator <- S_boot > t
 denominator <- sum(indicator)
 if (denominator > 0) {
 
-# 计算分子
+# Calculate numerator
 numerator1 <- sum(X1_boot* indicator)
 numerator2 <- sum(X2_boot* indicator)
 
-#基于经验值(实际值)的TM值
+# TM values based on empirical (actual) data
 TM_SEDAN_act <- numerator1 / denominator
 TM_STNWG_act <- numerator2 / denominator
 } else {
@@ -263,46 +238,46 @@ TM_SEDAN_act <- NA
 TM_STNWG_act<- NA
 }
 
-cat("\n=== 实际尾矩计算结果（一阶，n=1） ===\n")
-cat("实际TM_SEDAN(t) =", round(TM_SEDAN_act , 2), "千美元\n")
-cat("实际TM_STNWG(t) =", round(TM_STNWG_act, 2), "千美元\n")
-cat("实际总尾矩 =", round(TM_SEDAN_act + TM_STNWG_act, 2), "千美元\n")
+cat("\n=== Actual Tail Moment Calculation Results (first order, n=1) ===\n")
+cat("Actual TM_SEDAN(t) =", round(TM_SEDAN_act , 2), "thousand dollars\n")
+cat("Actual TM_STNWG(t) =", round(TM_STNWG_act, 2), "thousand dollars\n")
+cat("Actual total tail moment =", round(TM_SEDAN_act + TM_STNWG_act, 2), "thousand dollars\n")
 
-# 实际资本分配比例
+# Actual capital allocation proportion
 total_TM_act <- TM_SEDAN_act + TM_STNWG_act
 capital_share_sedan_act <- TM_SEDAN_act / total_TM_act
 capital_share_stnwg_act <- TM_STNWG_act / total_TM_act
 
-cat("\n=== 实际资本分配 ===\n")
-cat("基于实际尾矩的资本分配比例：\n")
-cat("实际SEDAN业务线：", round(capital_share_sedan_act * 100, 2), "%\n")
-cat("实际STNWG业务线：", round(capital_share_stnwg_act * 100, 2), "%\n")
+cat("\n=== Actual Capital Allocation ===\n")
+cat("Capital allocation proportion based on actual tail moments:\n")
+cat("Actual SEDAN business line:", round(capital_share_sedan_act * 100, 2), "%\n")
+cat("Actual STNWG business line:", round(capital_share_stnwg_act * 100, 2), "%\n")
 
 theo_TM_SEDAN<- 4.25
 theo_TM_STNWG<- t
-# 资本分配比例
+# Capital allocation proportion
 total_TM <- theo_TM_SEDAN + theo_TM_STNWG
 capital_share_sedan <- theo_TM_SEDAN / total_TM
 capital_share_stnwg <- theo_TM_STNWG / total_TM
 
-cat("\n=== 理论尾矩计算结果（一阶，n=1） ===\n")
-cat("TM_SEDAN(t) =", round(theo_TM_SEDAN, 2), "千美元\n")
-cat("TM_STNWG(t) =", round(theo_TM_STNWG, 2), "千美元\n")
-cat("总尾矩 =", round(theo_TM_SEDAN + theo_TM_STNWG, 2), "千美元\n")
+cat("\n=== Theoretical Tail Moment Calculation Results (first order, n=1) ===\n")
+cat("TM_SEDAN(t) =", round(theo_TM_SEDAN, 2), "thousand dollars\n")
+cat("TM_STNWG(t) =", round(theo_TM_STNWG, 2), "thousand dollars\n")
+cat("Total tail moment =", round(theo_TM_SEDAN + theo_TM_STNWG, 2), "thousand dollars\n")
 
 
-cat("\n=== 资本分配建议 ===\n")
-cat("基于理论尾矩的资本分配比例：\n")
-cat("SEDAN业务线：", round(capital_share_sedan * 100, 2), "%\n")
-cat("STNWG业务线：", round(capital_share_stnwg * 100, 2), "%\n")
+cat("\n=== Capital Allocation Recommendation ===\n")
+cat("Capital allocation proportion based on theoretical tail moments:\n")
+cat("SEDAN business line:", round(capital_share_sedan * 100, 2), "%\n")
+cat("STNWG business line:", round(capital_share_stnwg * 100, 2), "%\n")
 
-cat("\n业务解释：\n")
+cat("\nBusiness Interpretation:\n")
 if (capital_share_sedan > capital_share_stnwg) {
-  cat("由于SEDAN业务线的尺度参数γ较小（尾部更重），在极端损失情景下，")
-  cat("它贡献了", round(capital_share_sedan * 100, 1), "%的风险资本需求。\n")
-  cat("因此，风险管理重点应放在SEDAN业务线上。\n")
+  cat("Due to the smaller scale parameter γ (heavier tail) of the SEDAN business line, ")
+  cat("under extreme loss scenarios, it contributes", round(capital_share_sedan * 100, 1), "% of the risk capital requirement.\n")
+  cat("Therefore, risk management efforts should focus on the SEDAN business line.\n")
 } else {
-  cat("由于STNWG业务线的尺度参数γ较小（尾部更重），在极端损失情景下，")
-  cat("它贡献了", round(capital_share_stnwg * 100, 1), "%的风险资本需求。\n")
-  cat("因此，风险管理重点应放在STNWG业务线上。\n")
+  cat("Due to the smaller scale parameter γ (heavier tail) of the STNWG business line, ")
+  cat("under extreme loss scenarios, it contributes", round(capital_share_stnwg * 100, 1), "% of the risk capital requirement.\n")
+  cat("Therefore, risk management efforts should focus on the STNWG business line.\n")
 }
