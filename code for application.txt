@@ -1,0 +1,233 @@
+if (!require("insuranceData")) install.packages("insuranceData")
+if (!require("fitdistrplus")) install.packages("fitdistrplus")
+if (!require("actuar")) install.packages("actuar")
+if (!require("ggplot2")) install.packages("ggplot2")
+
+library(insuranceData)
+library(fitdistrplus)
+library(actuar)
+library(ggplot2)
+library(moments) 
+library(VineCopula) 
+library(copula)
+library(numDeriv)
+
+data(dataCar)
+df <-dataCar
+
+str(df)
+summary(df)
+
+cat("Missing value count:\n")
+colSums(is.na(df))
+
+df_sub <- df[df$veh_body %in% c("SEDAN", "STNWG"), ]
+
+claim_sedan <- df_sub$claimcst0[df_sub$veh_body == "SEDAN" & 
+                                 df_sub$claimcst0 > 0 ]
+
+claim_stnwg <- df_sub$claimcst0[df_sub$veh_body == "STNWG" & 
+                                 df_sub$claimcst0 > 0 ]
+
+claim_sedan <- claim_sedan / 1000
+claim_stnwg <- claim_stnwg / 1000
+
+#set.seed(30)
+B <- 1e6 
+X1_boot <- sample(claim_sedan, B, replace = TRUE)
+X2_boot <- sample(claim_stnwg, B, replace = TRUE)
+
+data_summary <- function(data, name) {
+  cat("\n=== ", name, "Business Line Summary Statistics ===\n")
+  cat("Sample size:", length(data), "\n")
+  cat("Mean:", round(mean(data), 2), "thousand dollars\n")
+  cat("Standard deviation:", round(sd(data), 2), "thousand dollars\n")
+  cat("Variance:", round(var(data), 2), "thousand dollars\n")
+  cat("Median:", round(median(data), 2), "thousand dollars\n")
+  cat("  Skewness:", round(skewness(data), 3), "thousand dollars\n")
+  cat("  Kurtosis:", round(kurtosis(data), 3), "thousand dollars\n")
+  cat("95% quantile:", round(quantile(data, 0.95), 2), "thousand dollars\n")
+  cat("99% quantile:", round(quantile(data, 0.99), 2), "thousand dollars\n")
+}
+
+data_summary(claim_sedan, "SEDAN")
+data_summary(claim_stnwg, "STNWG")
+
+data_summary(X1_boot, "SEDAN")
+data_summary(X2_boot, "STNWG")
+
+random_pairs <- data.frame(sedan = X1_boot, stnwg = X2_boot )
+
+fgm_mle_copula <- function(data) {
+  u <- rank(data$sedan) / (length(data$sedan) + 1)
+  v <- rank(data$stnwg) / (length(data$stnwg) + 1)
+  
+  fgm_copula_density <- function(theta, u, v) {
+    return(1 + theta * (1 - 2*u) * (1 - 2*v))
+  }
+  
+  neg_log_likelihood <- function(theta) {
+    if(abs(theta) > 1) return(1e10)
+    
+    c_vals <- fgm_copula_density(theta, u, v)
+    if(any(c_vals <= 0)) return(1e10)
+    
+    return(-sum(log(c_vals)))
+  }
+  
+  result <- optimize(neg_log_likelihood, interval = c(-1, 1))
+  
+  hessian_val <- hessian(neg_log_likelihood, result$minimum)
+  se <- sqrt(1 / hessian_val)
+  
+  return(list(
+    theta = result$minimum,
+    log_likelihood = -result$objective,
+    standard_error = se,
+    converged = TRUE
+  ))
+}
+
+mle_result_copula <- fgm_mle_copula(random_pairs)
+print("FGM Copula MLE Results:")
+print(mle_result_copula)
+ci_lower <- mle_result_copula$theta - 1.96 * mle_result_copula$standard_error
+ci_upper <- mle_result_copula$theta + 1.96 * mle_result_copula$standard_error
+
+gamma_mom <- function(data) {
+  m <- mean(data)
+  v <- var(data)
+  shape <- m^2 / v        
+  rate <- m / v          
+  return(list(shape = shape, rate = rate, 
+              mean = m, var = v))
+}
+
+
+fit_sedan_mom <- gamma_mom(X1_boot)
+fit_stnwg_mom <- gamma_mom(X2_boot)
+shape1<- fit_sedan_mom$shape
+rate1<- fit_sedan_mom$rate
+shape2<- fit_stnwg_mom$shape
+rate2<- fit_stnwg_mom$rate
+
+cat("\n=== Gamma Distribution Moment Estimation Parameters ===\n")
+cat("SEDAN: shape =", round(fit_sedan_mom$shape, 3), 
+    "rate =", round(fit_sedan_mom$rate, 5), 
+    "(γ =", round(fit_sedan_mom$rate, 5), ")\n")
+cat("STNWG: shape =", round(fit_stnwg_mom$shape, 3), 
+    "rate =", round(fit_stnwg_mom$rate, 5), 
+    "(γ =", round(fit_stnwg_mom$rate, 5), ")\n")
+
+gamma_values <- c(SEDAN = fit_sedan_mom$rate, 
+                  STNWG = fit_stnwg_mom$rate)
+gamma_star <- min(gamma_values)
+Lambda <- names(gamma_values)[gamma_values == gamma_star]
+Lambda_c <- names(gamma_values)[gamma_values != gamma_star]
+
+cat("\n=== Theorem Parameter Identification ===\n")
+cat("γ* = min(γ) =", round(gamma_star, 5), "\n")
+cat("Λ (γ_i = γ*) =", paste(Lambda, collapse = ", "), "\n")
+cat("Λ^c =", paste(Lambda_c, collapse = ", "), "\n")
+
+set.seed(123)
+sedan_sub <- sample(X1_boot, 5000)
+stnwg_sub <- sample(X2_boot, 5000)
+
+par(cex.lab=1, cex.axis=1, cex.main=1)
+par(mfrow= c(1, 2),mar=c(4,4,2,1), oma=c(0,0,0,0), mgp=c(2,1,0))
+qqplot(qgamma(ppoints(length(stnwg_sub)), 
+              shape = fit_stnwg_mom$shape, 
+              rate = fit_stnwg_mom$rate),
+       stnwg_sub,
+       main=expression(paste( "(a) Q-Q plot of ", ~X[1])),
+    xlab = "Theoretical gamma quantiles", 
+       ylab = "Sample quantiles",
+pch = 19, col = rgb(0.8, 0.4, 0.2, 0.6), cex = 0.8, lwd = 1.5)
+abline(0, 1, col = "red", cex = 0.8, lwd = 1.5)
+
+qqplot(qgamma(ppoints(length(sedan_sub )), 
+              shape = fit_sedan_mom$shape, 
+              rate = fit_sedan_mom$rate),
+       sedan_sub, main=expression(paste( "(b) Q-Q plot of ", ~X[2])),
+    xlab = "Theoretical gamma quantiles", 
+       ylab = "Sample quantiles",
+       pch = 19, col = rgb(0.2, 0.4, 0.8, 0.6), cex = 0.8, lwd = 1.5)
+abline(0, 1, col = "red",cex = 0.8, lwd = 1.5)
+
+par(cex.lab=1, cex.axis=1, cex.main=1)
+par(mfrow= c(1, 2),mar=c(4,4,2,1), oma=c(0,0,0,0), mgp=c(2,1,0))
+hist(X2_boot, breaks = 30, probability = TRUE,
+     main = expression(paste( "(a) Density comparison plot of ", ~X[1])),
+     xlab = "",  ylab = "", col = "lightgreen",
+     xlim = c(0, quantile(claim_stnwg, 0.99)),cex = 0.8, lwd = 1.5)
+curve(dgamma(x, shape = fit_stnwg_mom$shape, 
+             rate = fit_stnwg_mom$rate),
+      add = TRUE, col = "red", cex = 0.8, lwd = 1.5)
+
+hist(X1_boot, breaks = 30, probability = TRUE,
+     main = expression(paste( "(b) Density comparison plot  of ", ~X[2])),
+     xlab = "",  ylab = "",col = "lightblue",
+     xlim = c(0, quantile(claim_sedan, 0.99)),cex = 0.8, lwd = 1.5)
+curve(dgamma(x, shape = fit_sedan_mom$shape, 
+             rate = fit_sedan_mom$rate),
+      add = TRUE, col = "red", cex = 0.8, lwd = 1.5)
+
+
+S_boot <- X1_boot+X2_boot 
+#t <- quantile(S_boot, 0.999)   
+n <- 1
+
+indicator <- S_boot > t
+denominator <- sum(indicator)
+if (denominator > 0) {
+numerator1 <- sum(X1_boot* indicator)
+numerator2 <- sum(X2_boot* indicator)
+TM_SEDAN_act <- numerator1 / denominator
+TM_STNWG_act <- numerator2 / denominator
+} else {
+TM_SEDAN_act <- NA
+TM_STNWG_act<- NA
+}
+
+cat("\n=== Actual Tail Moment Calculation Results (first order, n=1) ===\n")
+cat("Actual TM_SEDAN(t) =", round(TM_SEDAN_act , 2), "thousand dollars\n")
+cat("Actual TM_STNWG(t) =", round(TM_STNWG_act, 2), "thousand dollars\n")
+cat("Actual total tail moment =", round(TM_SEDAN_act + TM_STNWG_act, 2), "thousand dollars\n")
+
+total_TM_act <- TM_SEDAN_act + TM_STNWG_act
+capital_share_sedan_act <- TM_SEDAN_act / total_TM_act
+capital_share_stnwg_act <- TM_STNWG_act / total_TM_act
+
+cat("\n=== Actual Capital Allocation ===\n")
+cat("Capital allocation proportion based on actual tail moments:\n")
+cat("Actual SEDAN business line:", round(capital_share_sedan_act * 100, 2), "%\n")
+cat("Actual STNWG business line:", round(capital_share_stnwg_act * 100, 2), "%\n")
+
+theo_TM_SEDAN<- 4.25
+theo_TM_STNWG<- t
+total_TM <- theo_TM_SEDAN + theo_TM_STNWG
+capital_share_sedan <- theo_TM_SEDAN / total_TM
+capital_share_stnwg <- theo_TM_STNWG / total_TM
+
+cat("\n=== Theoretical Tail Moment Calculation Results (first order, n=1) ===\n")
+cat("TM_SEDAN(t) =", round(theo_TM_SEDAN, 2), "thousand dollars\n")
+cat("TM_STNWG(t) =", round(theo_TM_STNWG, 2), "thousand dollars\n")
+cat("Total tail moment =", round(theo_TM_SEDAN + theo_TM_STNWG, 2), "thousand dollars\n")
+
+
+cat("\n=== Capital Allocation Recommendation ===\n")
+cat("Capital allocation proportion based on theoretical tail moments:\n")
+cat("SEDAN business line:", round(capital_share_sedan * 100, 2), "%\n")
+cat("STNWG business line:", round(capital_share_stnwg * 100, 2), "%\n")
+
+cat("\nBusiness Interpretation:\n")
+if (capital_share_sedan > capital_share_stnwg) {
+  cat("Due to the smaller scale parameter γ (heavier tail) of the SEDAN business line, ")
+  cat("under extreme loss scenarios, it contributes", round(capital_share_sedan * 100, 1), "% of the risk capital requirement.\n")
+  cat("Therefore, risk management efforts should focus on the SEDAN business line.\n")
+} else {
+  cat("Due to the smaller scale parameter γ (heavier tail) of the STNWG business line, ")
+  cat("under extreme loss scenarios, it contributes", round(capital_share_stnwg * 100, 1), "% of the risk capital requirement.\n")
+  cat("Therefore, risk management efforts should focus on the STNWG business line.\n")
+}
